@@ -60,13 +60,26 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     df['channel'] = np.random.choice([0, 1, 2], num_rows, p=[0.7, 0.2, 0.1]) # 0:MobileApp, 1:Web, 2:API
     df['location_diff_km'] = np.clip(np.random.lognormal(0.5, 1, num_rows) - 0.5, 0, 5000)
     
-    # 4. Các cột hành vi (đã có)
+    # 4. Các cột hành vi (ĐÃ SỬA LỖI ROLLING WINDOW)
     df['time_gap_prev_min'] = df.groupby('user_id')['timestamp'].diff().dt.total_seconds().fillna(0) / 60
     df['time_gap_prev_min'] = df['time_gap_prev_min'].apply(lambda x: x if x > 1 else np.random.lognormal(2, 1))
 
-    df['velocity_1h'] = df.groupby('user_id')['timestamp'].rolling('1h', on='timestamp', closed='left').count().reset_index(level=0, drop=True)
-    df['velocity_24h'] = df.groupby('user_id')['timestamp'].rolling('24h', on='timestamp', closed='left').count().reset_index(level=0, drop=True)
+    # --- KHẮC PHỤC LỖI ValueError: window must not be None ---
+    # 1. Tạo DataFrame tạm thời với 'timestamp' làm index
+    df_temp = df.set_index('timestamp')
+    
+    # 2. Tính velocity bằng cách groupby 'user_id', sau đó rolling trên index thời gian
+    # .size() hoặc .count() đều hoạt động tốt ở đây
+    velocity_1h = df_temp.groupby('user_id').rolling('1h', closed='left').size()
+    velocity_24h = df_temp.groupby('user_id').rolling('24h', closed='left').size()
+
+    # 3. Gán kết quả trở lại df gốc
+    df['velocity_1h'] = velocity_1h.reset_index(level=0, drop=True)
+    df['velocity_24h'] = velocity_24h.reset_index(level=0, drop=True)
+    
+    # Tiếp tục tính freq_norm
     df['freq_norm'] = (df['velocity_24h'] - df['velocity_24h'].min()) / (df['velocity_24h'].max() - df['velocity_24h'].min())
+    # -----------------------------------------------------------
 
     df['is_new_recipient'] = np.random.choice([0, 1], num_rows, p=[0.9, 0.1]) 
     df['recipient_count_30d'] = np.clip(np.random.lognormal(1.2, 0.5, num_rows).astype(int), 1, 15)
@@ -76,20 +89,18 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     # 5. Các cột MỚI để bắt Lừa đảo (Scam Features)
     
     # 5.1 amount_vs_avg_user_1m (Tỷ lệ so với trung bình 1 tháng)
-    # Giả lập amount trung bình của user trong 1 tháng trước đó
-    df['avg_amount_1m'] = df.groupby('user_id')['amount'].transform(lambda x: x.rolling('30d', on=df['timestamp'], closed='left').mean().shift(1).fillna(x.mean() * 0.5))
+    # Tương tự, cần set index để tính rolling mean dựa trên thời gian
+    df_temp = df.set_index('timestamp')
+    df['avg_amount_1m'] = df_temp.groupby('user_id')['amount'].rolling('30d', closed='left').mean().reset_index(level=0, drop=True).shift(1).fillna(df['amount'].mean() * 0.5)
     df['amount_vs_avg_user_1m'] = df['amount'] / df['avg_amount_1m']
     df.drop(columns=['avg_amount_1m'], inplace=True)
-
+    
     # 5.2 is_first_large_tx (Giao dịch lớn nhất từ trước đến nay)
-    # Giao dịch được coi là "lớn" nếu vượt quá 95th percentile của user đó
     df['max_amount_seen'] = df.groupby('user_id')['amount'].transform(lambda x: x.cummax().shift(1).fillna(0))
-    # Giả định "lớn" là lớn hơn 2 lần max_amount_seen trước đó (hoặc là giao dịch đầu tiên)
     df['is_first_large_tx'] = ((df['amount'] > 2 * df['max_amount_seen']) | (df['max_amount_seen'] == 0)).astype(int)
     df.drop(columns=['max_amount_seen'], inplace=True)
     
     # 5.3 recipient_is_suspicious (Tài khoản người nhận bị đánh dấu)
-    # Giả định 1% người nhận là đáng ngờ. Các giao dịch lừa đảo (Scam) thường đến các tài khoản này.
     df['recipient_is_suspicious'] = np.random.choice([0, 1], num_rows, p=[0.99, 0.01])
     
     # 6. Cột gian lận (Target) và Anomaly Score
@@ -100,37 +111,32 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     df['is_fraud'] = labels
 
     # --- Điều chỉnh dữ liệu cho ATO (Hack) và SCAM (Lừa đảo) ---
-    
-    # Giả lập Fraud (ATO - Chiếm đoạt tài khoản) (70% mẫu gian lận)
     num_ato = int(num_fraud * 0.7)
     ato_indices = np.random.choice(fraud_indices, num_ato, replace=False)
     df.loc[ato_indices, 'amount'] = np.clip(np.random.lognormal(9, 1.5, num_ato), 500000, 10000000)
     df.loc[ato_indices, 'time_gap_prev_min'] = np.random.uniform(0, 10, num_ato)
     df.loc[ato_indices, 'is_new_recipient'] = 1 
-    df.loc[ato_indices, 'is_new_device'] = 1 # Rất quan trọng cho ATO
+    df.loc[ato_indices, 'is_new_device'] = 1 
     df.loc[ato_indices, 'location_diff_km'] = np.clip(np.random.lognormal(4, 1.5, num_ato), 50, 5000)
 
-    # Giả lập Scam (Lừa đảo) (30% mẫu gian lận)
     scam_indices = np.setdiff1d(fraud_indices, ato_indices)
     num_scam = len(scam_indices)
     df.loc[scam_indices, 'amount'] = np.clip(np.random.lognormal(8.5, 1, num_scam), 200000, 5000000)
-    df.loc[scam_indices, 'amount_vs_avg_user_1m'] = np.clip(df.loc[scam_indices, 'amount_vs_avg_user_1m'] * np.random.uniform(2, 5, num_scam), 3, 10) # Tỷ lệ amount cao
-    df.loc[scam_indices, 'is_first_large_tx'] = 1 # Thường là giao dịch lớn nhất
-    df.loc[scam_indices, 'recipient_is_suspicious'] = 1 # Thường chuyển đến tài khoản đáng ngờ
-    df.loc[scam_indices, 'is_new_device'] = 0 # Vẫn là thiết bị cũ
+    df.loc[scam_indices, 'amount_vs_avg_user_1m'] = np.clip(df.loc[scam_indices, 'amount_vs_avg_user_1m'] * np.random.uniform(2, 5, num_scam), 3, 10)
+    df.loc[scam_indices, 'is_first_large_tx'] = 1
+    df.loc[scam_indices, 'recipient_is_suspicious'] = 1
+    df.loc[scam_indices, 'is_new_device'] = 0 
 
     # Tính toán lại các cột phụ thuộc sau khi chỉnh sửa amount
     df['amount_log'] = np.log1p(df['amount'])
     df['amount_norm'] = (df['amount'] - df['amount'].min()) / (df['amount'].max() - df['amount'].min())
 
-    # Tính global_anomaly_score_prev (Điểm bất thường toàn cầu trước đó)
-    # Cộng các đặc trưng bất thường lại: amount_norm (lớn), (1-time_gap_prev_min), is_new_recipient, is_new_device, location_diff_km, amount_vs_avg_user_1m, recipient_is_suspicious
+    # Tính global_anomaly_score_prev 
     base_score = df['amount_norm'] + (1 - df['time_gap_prev_min'].clip(upper=100)/100) + df['is_new_recipient'] + df['is_new_device'] + (df['location_diff_km'].clip(upper=100)/100) + (df['amount_vs_avg_user_1m'].clip(upper=10)/10) + df['recipient_is_suspicious']
     
     df['global_anomaly_score_prev'] = (base_score + np.random.normal(0, 0.5, num_rows)) / base_score.max()
     df['global_anomaly_score_prev'] = df['global_anomaly_score_prev'].clip(0.01, 0.99)
     
-    # Đảm bảo các giao dịch gian lận/lừa đảo có điểm cao hơn
     df.loc[df['is_fraud'] == 1, 'global_anomaly_score_prev'] = np.clip(df.loc[df['is_fraud'] == 1, 'global_anomaly_score_prev'] + np.random.uniform(0.1, 0.3, num_fraud), 0.7, 0.99)
     
     # 7. Chọn 24 cột đặc trưng yêu cầu và cột nhãn
@@ -141,19 +147,12 @@ def generate_synthetic_data(num_rows, fraud_ratio):
         'recipient_count_30d', 'is_new_device', 'device_count_30d', 
         'location_diff_km', 'channel', 'account_age_days', 
         'amount_percentile_system', 'global_anomaly_score_prev',
-        # 3 Cột MỚI
         'amount_vs_avg_user_1m', 'is_first_large_tx', 'recipient_is_suspicious',
         'is_fraud'
     ]
     
-    # Chuyển đổi mã channel (0, 1, 2) về tên nếu muốn xem trên Streamlit (hoặc giữ số cho mô hình)
-    channel_mapping = {0: 'MobileApp', 1: 'Web', 2: 'API'}
-    df['channel_name'] = df['channel'].map(channel_mapping)
-    
+    # Giữ mã số (0, 1, 2) cho mô hình
     df_output = df[final_columns].copy()
-    
-    # Thay thế cột 'channel' bằng tên nếu bạn muốn xem, nếu không thì giữ mã số (hiệu quả hơn cho LightGBM)
-    # Ta giữ mã số (0, 1, 2) cho mô hình
     
     st.success(f"Tạo dữ liệu thành công! Tỷ lệ gian lận/lừa đảo: {df_output['is_fraud'].mean()*100:.2f}%")
     return df_output.sort_values(by='tx_id').reset_index(drop=True)
