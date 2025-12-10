@@ -172,4 +172,43 @@ fraud_ratio_target = st.sidebar.slider(
     max_value=10.0,
     value=5.0,
     step=0.1,
-    format="%.1f%%
+    format="%.1f%%"
+)
+
+st.sidebar.markdown("---")
+
+if st.sidebar.button("🚀 Tạo Dữ liệu Mẫu", use_container_width=True):
+    with st.spinner("Đang tạo dữ liệu..."):
+        df_generated = generate_synthetic_data(num_rows_target, fraud_ratio_target / 100)
+        st.session_state['generated_data'] = df_generated
+
+st.markdown("---")
+
+if 'generated_data' in st.session_state:
+    df_display = st.session_state['generated_data']
+
+    st.subheader("📊 Dữ liệu đã tạo")
+    st.dataframe(df_display, use_container_width=True)
+
+    st.subheader("📈 Thống kê cơ bản")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Tổng giao dịch", f"{len(df_display):,}")
+    with col2:
+        st.metric("Số giao dịch gian lận", f"{df_display['is_fraud'].sum():,}")
+    with col3:
+        st.metric("Tỷ lệ gian lận", f"{df_display['is_fraud'].mean()*100:.2f}%")
+    with col4:
+        st.metric("Số người dùng", f"{df_display['user_id'].nunique():,}")
+
+    st.subheader("📥 Tải xuống dữ liệu")
+    csv_data = df_display.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="⬇️ Tải file CSV",
+        data=csv_data,
+        file_name=f"fraud_detection_data_{len(df_display)}_rows.csv",
+        mime="text/csv",
+        use_container_width=True
+    )
+else:
+    st.info("👈 Vui lòng cấu hình tham số ở sidebar và nhấn **Tạo Dữ liệu Mẫu** để bắt đầu.")
