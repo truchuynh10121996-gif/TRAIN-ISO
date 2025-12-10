@@ -383,7 +383,7 @@ def generate_synthetic_data(num_rows, fraud_ratio, scam_ratio=0.6):
 
     # 8. Amount derived features
     df['amount_log'] = np.log1p(df['amount'])
-    df['amount_norm'] = (df['amount'] - df['amount'].min()) / (df['amount'].max() - df['amount'].min() + 1)
+    # Bỏ amount_norm để tránh multicollinearity với amount_log
     df['amount_percentile_system'] = df['amount'].rank(pct=True)
 
     # 9. Account và device features
@@ -406,7 +406,7 @@ def generate_synthetic_data(num_rows, fraud_ratio, scam_ratio=0.6):
 
     df['velocity_1h'] = df['velocity_1h'].fillna(0)
     df['velocity_24h'] = df['velocity_24h'].fillna(0)
-    df['freq_norm'] = (df['velocity_24h'] - df['velocity_24h'].min()) / (df['velocity_24h'].max() - df['velocity_24h'].min() + 1)
+    # Bỏ freq_norm để tránh multicollinearity với velocity_24h
 
     # 11. Recipient và device patterns
     df['is_new_recipient'] = np.random.choice([0, 1], num_rows, p=[0.88, 0.12])
@@ -541,13 +541,69 @@ def generate_synthetic_data(num_rows, fraud_ratio, scam_ratio=0.6):
 
     # 16. Recalculate derived columns sau khi modify
     df['amount_log'] = np.log1p(df['amount'])
-    df['amount_norm'] = (df['amount'] - df['amount'].min()) / (df['amount'].max() - df['amount'].min() + 1)
     df['amount_percentile_system'] = df['amount'].rank(pct=True)
-    df['freq_norm'] = (df['velocity_24h'] - df['velocity_24h'].min()) / (df['velocity_24h'].max() - df['velocity_24h'].min() + 1)
 
-    # 17. Global anomaly score
+    # 17. Thêm features tối ưu cho từng model
+
+    # === Features cho ISOLATION FOREST (unsupervised anomaly detection) ===
+    # Isolation Forest hiệu quả với features có phân bố continuous, ít categorical
+
+    # Amount deviation từ median user (robust hơn mean)
+    user_median_amount = df.groupby('user_id')['amount'].transform('median')
+    df['amount_deviation_ratio'] = df['amount'] / user_median_amount.clip(lower=10000)
+
+    # Time since last transaction (hours) - outlier indicator
+    df['hours_since_prev_tx'] = df['time_gap_prev_min'] / 60
+
+    # Velocity ratio (1h vs 24h) - burst detection
+    df['velocity_ratio'] = df['velocity_1h'] / (df['velocity_24h'].clip(lower=1))
+
+    # Location anomaly score (log scale cho outlier detection)
+    df['location_anomaly'] = np.log1p(df['location_diff_km'])
+
+    # Hour deviation from user's typical pattern
+    user_typical_hour = df.groupby('user_id')['hour_of_day'].transform('median')
+    df['hour_deviation'] = np.abs(df['hour_of_day'] - user_typical_hour)
+
+    # Account age risk (younger = riskier)
+    df['account_age_risk'] = 1 / np.log1p(df['account_age_days'])
+
+    # === Features cho LIGHTGBM (supervised classification) ===
+    # LightGBM xử lý tốt categorical và interactions
+
+    # Transaction type risk encoding (dựa trên fraud rate thực tế VN)
+    tx_risk_map = {0: 0.02, 1: 0.15, 2: 0.03, 3: 0.08, 4: 0.05, 5: 0.01, 6: 0.02, 7: 0.12}
+    df['tx_type_risk'] = df['transaction_type'].map(tx_risk_map)
+
+    # Channel risk encoding
+    channel_risk_map = {0: 0.04, 1: 0.08, 2: 0.06}  # Mobile, Web, ATM
+    df['channel_risk'] = df['channel'].map(channel_risk_map)
+
+    # Combined behavioral risk score
+    df['behavioral_risk_score'] = (
+        df['is_new_recipient'] * 0.25 +
+        df['is_new_device'] * 0.30 +
+        df['is_night_hours'] * 0.15 +
+        df['recipient_is_suspicious'] * 0.30
+    )
+
+    # Amount tier encoding (ordinal)
+    df['amount_tier'] = pd.cut(df['amount'],
+                               bins=[0, 200000, 2000000, 20000000, float('inf')],
+                               labels=[0, 1, 2, 3]).astype(int)
+
+    # Time context risk (weekend + night combo)
+    df['time_context_risk'] = df['is_weekend'] * 0.3 + df['is_night_hours'] * 0.7
+
+    # User activity level (transactions per day estimate)
+    df['user_activity_level'] = df.groupby('user_id')['tx_id'].transform('count') / 180  # 6 months
+
+    # Recipient diversity risk
+    df['recipient_diversity'] = df['recipient_count_30d'] / 30  # Normalized
+
+    # 18. Global anomaly score (cập nhật với features mới)
     base_score = (
-        df['amount_norm'] * 2 +
+        df['amount_percentile_system'] * 2 +
         df['is_night_hours'] * 1.5 +
         df['is_new_recipient'] * 1.5 +
         df['is_new_device'] * 2 +
@@ -567,17 +623,32 @@ def generate_synthetic_data(num_rows, fraud_ratio, scam_ratio=0.6):
         0.65, 0.99
     )
 
-    # 18. Chọn final columns
+    # 19. Chọn final columns
     final_columns = [
-        'tx_id', 'user_id', 'transaction_type', 'amount', 'amount_log', 'amount_norm',
-        'hour_of_day', 'day_of_week', 'day_of_month', 'is_weekend',
-        'is_salary_period', 'is_bill_period', 'is_night_hours',
-        'time_gap_prev_min', 'velocity_1h', 'velocity_24h', 'freq_norm',
+        # Identification
+        'tx_id', 'user_id',
+        # Transaction info
+        'transaction_type', 'amount', 'channel',
+        # Amount features
+        'amount_log', 'amount_percentile_system', 'amount_vs_avg_user', 'amount_tier',
+        # Time features
+        'hour_of_day', 'day_of_week', 'day_of_month',
+        'is_weekend', 'is_salary_period', 'is_bill_period', 'is_night_hours',
+        # Behavioral features
+        'time_gap_prev_min', 'velocity_1h', 'velocity_24h',
         'is_new_recipient', 'recipient_count_30d', 'is_new_device', 'device_count_30d',
-        'location_diff_km', 'channel', 'account_age_days',
-        'amount_percentile_system', 'amount_vs_avg_user', 'is_first_large_tx',
-        'recipient_is_suspicious', 'global_anomaly_score_prev',
-        'fraud_type', 'is_fraud'
+        # Location features
+        'location_diff_km', 'account_age_days',
+        # Risk indicators
+        'is_first_large_tx', 'recipient_is_suspicious',
+        # Isolation Forest optimized features
+        'amount_deviation_ratio', 'hours_since_prev_tx', 'velocity_ratio',
+        'location_anomaly', 'hour_deviation', 'account_age_risk',
+        # LightGBM optimized features
+        'tx_type_risk', 'channel_risk', 'behavioral_risk_score',
+        'time_context_risk', 'user_activity_level', 'recipient_diversity',
+        # Scores and labels
+        'global_anomaly_score_prev', 'fraud_type', 'is_fraud'
     ]
 
     df_output = df[final_columns].copy()
@@ -714,44 +785,180 @@ if 'generated_data' in st.session_state:
 
     st.subheader("📥 Tải xuống dữ liệu")
 
+    # Định nghĩa features cho từng model
+    ISOLATION_FOREST_FEATURES = [
+        'amount_log', 'amount_deviation_ratio', 'amount_vs_avg_user',
+        'hours_since_prev_tx', 'velocity_1h', 'velocity_24h', 'velocity_ratio',
+        'location_diff_km', 'location_anomaly',
+        'hour_deviation', 'is_night_hours',
+        'is_new_recipient', 'is_new_device',
+        'account_age_risk',
+        'is_fraud'  # Label
+    ]
+
+    LIGHTGBM_FEATURES = [
+        'transaction_type', 'amount_log', 'amount_tier', 'amount_vs_avg_user',
+        'channel', 'channel_risk', 'tx_type_risk',
+        'hour_of_day', 'day_of_week', 'is_weekend', 'is_night_hours',
+        'is_salary_period', 'is_bill_period',
+        'time_gap_prev_min', 'velocity_1h', 'velocity_24h',
+        'is_new_recipient', 'recipient_count_30d', 'is_new_device', 'device_count_30d',
+        'location_diff_km', 'account_age_days',
+        'is_first_large_tx', 'recipient_is_suspicious',
+        'behavioral_risk_score', 'time_context_risk',
+        'user_activity_level', 'recipient_diversity',
+        'is_fraud'  # Label
+    ]
+
     col1, col2 = st.columns(2)
 
     with col1:
+        st.markdown("**Full Data (Phân tích)**")
         # Full data
         csv_data = df_display.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="⬇️ Tải Full Data (CSV)",
+            label="⬇️ Full Data (CSV)",
             data=csv_data,
-            file_name=f"vietnam_fraud_data_{len(df_display)}_rows.csv",
+            file_name=f"vietnam_fraud_full_{len(df_display)}_rows.csv",
             mime="text/csv",
             use_container_width=True
         )
+        st.caption(f"{len(df_display.columns)} features - Đầy đủ để phân tích")
 
     with col2:
-        # Training data (không có fraud_type)
+        st.markdown("**Training Data (Không fraud_type)**")
         train_cols = [c for c in df_display.columns if c != 'fraud_type']
         csv_train = df_display[train_cols].to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="⬇️ Tải Training Data (không fraud_type)",
+            label="⬇️ Training Data (CSV)",
             data=csv_train,
-            file_name=f"vietnam_fraud_training_{len(df_display)}_rows.csv",
+            file_name=f"vietnam_fraud_train_{len(df_display)}_rows.csv",
             mime="text/csv",
             use_container_width=True
         )
+        st.caption(f"{len(train_cols)} features - Không có fraud_type column")
+
+    st.markdown("---")
+    st.markdown("**Training Data cho từng Model:**")
+
+    col3, col4 = st.columns(2)
+
+    with col3:
+        st.markdown("**Isolation Forest**")
+        st.caption("Unsupervised anomaly detection")
+        df_isolation = df_display[ISOLATION_FOREST_FEATURES].copy()
+        csv_isolation = df_isolation.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="⬇️ Isolation Forest Data",
+            data=csv_isolation,
+            file_name=f"vietnam_fraud_isolation_forest_{len(df_display)}_rows.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        st.caption(f"{len(ISOLATION_FOREST_FEATURES)} features")
+
+        with st.expander("Xem danh sách features"):
+            for f in ISOLATION_FOREST_FEATURES[:-1]:  # Trừ is_fraud
+                st.markdown(f"- `{f}`")
+
+    with col4:
+        st.markdown("**LightGBM**")
+        st.caption("Supervised classification")
+        df_lgbm = df_display[LIGHTGBM_FEATURES].copy()
+        csv_lgbm = df_lgbm.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="⬇️ LightGBM Data",
+            data=csv_lgbm,
+            file_name=f"vietnam_fraud_lightgbm_{len(df_display)}_rows.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        st.caption(f"{len(LIGHTGBM_FEATURES)} features")
+
+        with st.expander("Xem danh sách features"):
+            for f in LIGHTGBM_FEATURES[:-1]:  # Trừ is_fraud
+                st.markdown(f"- `{f}`")
 
 else:
     st.info("👈 Cấu hình tham số ở sidebar và nhấn **Tạo Dữ liệu** để bắt đầu.")
 
-    st.markdown("""
-    ### Các features chính:
+    tab1, tab2, tab3 = st.tabs(["Tổng quan", "Isolation Forest", "LightGBM"])
 
-    | Feature | Mô tả |
-    |---------|-------|
-    | `transaction_type` | 0: Bill, 1: Transfer, 2: Shopping, 3: ATM, 4: Ecommerce, 5: Food, 6: Utilities, 7: Investment |
-    | `amount` | Số tiền VND (làm tròn theo mệnh giá VN) |
-    | `is_salary_period` | 1 nếu ngày 25-5 (kỳ lương) |
-    | `is_bill_period` | 1 nếu ngày 1-10 (kỳ đóng bill) |
-    | `is_night_hours` | 1 nếu 22h-5h (giờ bất thường) |
-    | `amount_vs_avg_user` | Tỷ lệ so với trung bình 30 ngày của user |
-    | `fraud_type` | Loại fraud: scam_impersonation, scam_job_scam, ato_credential_theft... |
-    """)
+    with tab1:
+        st.markdown("""
+        ### Các features chính:
+
+        | Feature | Mô tả |
+        |---------|-------|
+        | `transaction_type` | 0: Bill, 1: Transfer, 2: Shopping, 3: ATM, 4: Ecommerce, 5: Food, 6: Utilities, 7: Investment |
+        | `amount_log` | Log-transformed amount (tốt hơn cho ML) |
+        | `is_salary_period` | 1 nếu ngày 25-5 (kỳ lương) |
+        | `is_bill_period` | 1 nếu ngày 1-10 (kỳ đóng bill) |
+        | `is_night_hours` | 1 nếu 22h-5h (giờ bất thường) |
+        | `amount_vs_avg_user` | Tỷ lệ so với trung bình 30 ngày của user |
+        | `fraud_type` | Loại fraud: scam_impersonation, scam_job_scam, ato_credential_theft... |
+        """)
+
+    with tab2:
+        st.markdown("""
+        ### Features cho Isolation Forest (14 features)
+
+        **Isolation Forest** là unsupervised anomaly detection - không cần label để train.
+        Hiệu quả với features continuous có outliers rõ ràng.
+
+        | Feature | Loại | Mô tả |
+        |---------|------|-------|
+        | `amount_log` | Continuous | Log của số tiền (giảm skewness) |
+        | `amount_deviation_ratio` | Continuous | Tỷ lệ so với median của user |
+        | `amount_vs_avg_user` | Continuous | Tỷ lệ so với mean 30 ngày của user |
+        | `hours_since_prev_tx` | Continuous | Số giờ kể từ GD trước (hours) |
+        | `velocity_1h` | Continuous | Số GD trong 1 giờ qua |
+        | `velocity_24h` | Continuous | Số GD trong 24 giờ qua |
+        | `velocity_ratio` | Continuous | Tỷ lệ velocity 1h/24h (burst detection) |
+        | `location_diff_km` | Continuous | Khoảng cách từ vị trí thường (km) |
+        | `location_anomaly` | Continuous | Log của location_diff_km |
+        | `hour_deviation` | Continuous | Độ lệch so với giờ thường của user |
+        | `is_night_hours` | Binary | 1 nếu 22h-5h |
+        | `is_new_recipient` | Binary | 1 nếu người nhận mới |
+        | `is_new_device` | Binary | 1 nếu thiết bị mới |
+        | `account_age_risk` | Continuous | 1/log(account_age) - tài khoản mới rủi ro hơn |
+        """)
+
+    with tab3:
+        st.markdown("""
+        ### Features cho LightGBM (29 features)
+
+        **LightGBM** là supervised gradient boosting - cần label để train.
+        Xử lý tốt categorical features và feature interactions.
+
+        | Feature | Loại | Mô tả |
+        |---------|------|-------|
+        | `transaction_type` | Categorical | Loại giao dịch (0-7) |
+        | `amount_log` | Continuous | Log của số tiền |
+        | `amount_tier` | Ordinal | Mức amount (0: <200k, 1: 200k-2M, 2: 2M-20M, 3: >20M) |
+        | `amount_vs_avg_user` | Continuous | Tỷ lệ so với trung bình user |
+        | `channel` | Categorical | 0: Mobile, 1: Web, 2: ATM |
+        | `channel_risk` | Continuous | Risk score theo channel |
+        | `tx_type_risk` | Continuous | Risk score theo loại GD |
+        | `hour_of_day` | Continuous | Giờ trong ngày (0-23) |
+        | `day_of_week` | Categorical | Ngày trong tuần (0-6) |
+        | `is_weekend` | Binary | 1 nếu thứ 7/CN |
+        | `is_night_hours` | Binary | 1 nếu 22h-5h |
+        | `is_salary_period` | Binary | 1 nếu ngày 25-5 |
+        | `is_bill_period` | Binary | 1 nếu ngày 1-10 |
+        | `time_gap_prev_min` | Continuous | Phút kể từ GD trước |
+        | `velocity_1h` | Continuous | Số GD trong 1 giờ |
+        | `velocity_24h` | Continuous | Số GD trong 24 giờ |
+        | `is_new_recipient` | Binary | 1 nếu người nhận mới |
+        | `recipient_count_30d` | Continuous | Số người nhận trong 30 ngày |
+        | `is_new_device` | Binary | 1 nếu thiết bị mới |
+        | `device_count_30d` | Continuous | Số thiết bị trong 30 ngày |
+        | `location_diff_km` | Continuous | Khoảng cách từ vị trí thường |
+        | `account_age_days` | Continuous | Tuổi tài khoản (ngày) |
+        | `is_first_large_tx` | Binary | 1 nếu là GD lớn đầu tiên |
+        | `recipient_is_suspicious` | Binary | 1 nếu người nhận đáng ngờ |
+        | `behavioral_risk_score` | Continuous | Combined risk từ behavior |
+        | `time_context_risk` | Continuous | Risk từ weekend + night |
+        | `user_activity_level` | Continuous | Mức hoạt động của user |
+        | `recipient_diversity` | Continuous | Đa dạng người nhận |
+        """)
