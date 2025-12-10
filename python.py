@@ -36,6 +36,7 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     timestamps = pd.to_datetime(start_date) + (end_date - start_date) * np.random.rand(num_rows)
     data['timestamp'] = timestamps
     
+    # Sắp xếp theo thời gian là bắt buộc cho rolling window
     df = pd.DataFrame(data).sort_values(by='timestamp').reset_index(drop=True)
 
     # 2. Cột về số tiền (Amount) - Số tiền chẵn nghìn
@@ -60,20 +61,18 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     df['channel'] = np.random.choice([0, 1, 2], num_rows, p=[0.7, 0.2, 0.1]) # 0:MobileApp, 1:Web, 2:API
     df['location_diff_km'] = np.clip(np.random.lognormal(0.5, 1, num_rows) - 0.5, 0, 5000)
     
-    # 4. Các cột hành vi (ĐÃ SỬA LỖI ROLLING WINDOW)
+    # 4. Các cột hành vi (ĐÃ SỬA LỖI AttributeError)
     df['time_gap_prev_min'] = df.groupby('user_id')['timestamp'].diff().dt.total_seconds().fillna(0) / 60
     df['time_gap_prev_min'] = df['time_gap_prev_min'].apply(lambda x: x if x > 1 else np.random.lognormal(2, 1))
 
-    # --- KHẮC PHỤC LỖI ValueError: window must not be None ---
     # 1. Tạo DataFrame tạm thời với 'timestamp' làm index
     df_temp = df.set_index('timestamp')
     
-    # 2. Tính velocity bằng cách groupby 'user_id', sau đó rolling trên index thời gian
-    # .size() hoặc .count() đều hoạt động tốt ở đây
-    velocity_1h = df_temp.groupby('user_id').rolling('1h', closed='left').size()
-    velocity_24h = df_temp.groupby('user_id').rolling('24h', closed='left').size()
+    # 2. Tính velocity: group theo user_id, sử dụng .count() trên một cột bất kỳ (ví dụ 'tx_id')
+    velocity_1h = df_temp.groupby('user_id')['tx_id'].rolling('1h', closed='left').count()
+    velocity_24h = df_temp.groupby('user_id')['tx_id'].rolling('24h', closed='left').count()
 
-    # 3. Gán kết quả trở lại df gốc
+    # 3. Gán kết quả trở lại df gốc (reset index để gán đúng vị trí)
     df['velocity_1h'] = velocity_1h.reset_index(level=0, drop=True)
     df['velocity_24h'] = velocity_24h.reset_index(level=0, drop=True)
     
@@ -89,9 +88,9 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     # 5. Các cột MỚI để bắt Lừa đảo (Scam Features)
     
     # 5.1 amount_vs_avg_user_1m (Tỷ lệ so với trung bình 1 tháng)
-    # Tương tự, cần set index để tính rolling mean dựa trên thời gian
-    df_temp = df.set_index('timestamp')
-    df['avg_amount_1m'] = df_temp.groupby('user_id')['amount'].rolling('30d', closed='left').mean().reset_index(level=0, drop=True).shift(1).fillna(df['amount'].mean() * 0.5)
+    # Sửa lỗi: Cần chọn cột 'amount' để tính rolling mean
+    avg_amount_1m = df_temp.groupby('user_id')['amount'].rolling('30d', closed='left').mean().reset_index(level=0, drop=True).shift(1).fillna(df['amount'].mean() * 0.5)
+    df['avg_amount_1m'] = avg_amount_1m # Gán lại vào df chính
     df['amount_vs_avg_user_1m'] = df['amount'] / df['avg_amount_1m']
     df.drop(columns=['avg_amount_1m'], inplace=True)
     
@@ -151,7 +150,6 @@ def generate_synthetic_data(num_rows, fraud_ratio):
         'is_fraud'
     ]
     
-    # Giữ mã số (0, 1, 2) cho mô hình
     df_output = df[final_columns].copy()
     
     st.success(f"Tạo dữ liệu thành công! Tỷ lệ gian lận/lừa đảo: {df_output['is_fraud'].mean()*100:.2f}%")
