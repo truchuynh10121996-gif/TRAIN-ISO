@@ -793,7 +793,7 @@ if 'generated_data' in st.session_state:
         'location_diff_km', 'location_anomaly',
         'hour_deviation', 'is_night_hours',
         'is_new_recipient', 'is_new_device',
-        'account_age_risk'
+        'account_age_risk', 'is_first_large_tx'
         # KHÔNG có is_fraud - Isolation Forest là unsupervised
     ]
 
@@ -919,7 +919,7 @@ else:
 
     with tab2:
         st.markdown("""
-        ### Features cho Isolation Forest (14 features)
+        ### Features cho Isolation Forest (15 features)
 
         **Isolation Forest** là **unsupervised** anomaly detection:
         - ⚠️ **KHÔNG dùng label (`is_fraud`) để train**
@@ -944,6 +944,7 @@ else:
         | `is_new_recipient` | Binary | 1 nếu người nhận mới |
         | `is_new_device` | Binary | 1 nếu thiết bị mới |
         | `account_age_risk` | Continuous | 1/log(account_age) - tài khoản mới rủi ro hơn |
+        | `is_first_large_tx` | Binary | 1 nếu là giao dịch lớn đầu tiên của user |
 
         #### Cách sử dụng đúng:
         ```python

@@ -26,7 +26,7 @@ Tool tạo dữ liệu giả lập giao dịch ngân hàng Việt Nam để trai
 |------|-------|----------|
 | `*_full.csv` | Đầy đủ tất cả features để phân tích | 40 columns |
 | `*_train.csv` | Training data chung (không có fraud_type) | 39 columns |
-| `vietnam_IF_features_*.csv` | **Isolation Forest - để TRAIN** | 14 features (không có label) |
+| `vietnam_IF_features_*.csv` | **Isolation Forest - để TRAIN** | 15 features (không có label) |
 | `vietnam_IF_labels_*.csv` | **Isolation Forest - để EVALUATE** | is_fraud + fraud_type |
 | `vietnam_LGBM_train_*.csv` | **LightGBM - để TRAIN** | 29 features + 1 label |
 
@@ -34,7 +34,7 @@ Tool tạo dữ liệu giả lập giao dịch ngân hàng Việt Nam để trai
 
 ## Features cho Isolation Forest
 
-**Tổng: 14 features (KHÔNG có label trong file train)**
+**Tổng: 15 features (KHÔNG có label trong file train)**
 
 > ⚠️ **QUAN TRỌNG**: Isolation Forest là thuật toán **unsupervised** - **KHÔNG dùng label để train!**
 > Label (`is_fraud`) được xuất ra file riêng để dùng cho việc **evaluate** model.
@@ -48,10 +48,10 @@ Isolation Forest hoạt động bằng cách "cô lập" các điểm bất thư
 
 | File | Nội dung | Mục đích |
 |------|----------|----------|
-| `vietnam_IF_features_*.csv` | 14 features | **Train** model |
+| `vietnam_IF_features_*.csv` | 15 features | **Train** model |
 | `vietnam_IF_labels_*.csv` | is_fraud, fraud_type | **Evaluate** model |
 
-### Danh sách features (14 features):
+### Danh sách features (15 features):
 
 | # | Feature | Loại | Mô tả | Tại sao quan trọng |
 |---|---------|------|-------|-------------------|
@@ -69,6 +69,7 @@ Isolation Forest hoạt động bằng cách "cô lập" các điểm bất thư
 | 12 | `is_new_recipient` | Binary | 1 nếu người nhận mới | Key fraud indicator |
 | 13 | `is_new_device` | Binary | 1 nếu thiết bị mới | ATO indicator |
 | 14 | `account_age_risk` | Continuous | `1 / log(account_age_days)` | Tài khoản mới = rủi ro cao hơn |
+| 15 | `is_first_large_tx` | Binary | 1 nếu là GD lớn đầu tiên của user | Scam indicator - nạn nhân thường chuyển lớn lần đầu |
 
 ### Cách sử dụng đúng với Isolation Forest:
 
