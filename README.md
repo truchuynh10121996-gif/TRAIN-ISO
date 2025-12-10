@@ -22,25 +22,36 @@ Tool tạo dữ liệu giả lập giao dịch ngân hàng Việt Nam để trai
 
 ## Files xuất ra
 
-| File | Mô tả | Số features |
-|------|-------|-------------|
-| `*_full.csv` | Đầy đủ tất cả features để phân tích | 40 |
-| `*_train.csv` | Training data (không có fraud_type) | 39 |
-| `*_isolation_forest.csv` | Features tối ưu cho Isolation Forest | 15 |
-| `*_lightgbm.csv` | Features tối ưu cho LightGBM | 30 |
+| File | Mô tả | Nội dung |
+|------|-------|----------|
+| `*_full.csv` | Đầy đủ tất cả features để phân tích | 40 columns |
+| `*_train.csv` | Training data chung (không có fraud_type) | 39 columns |
+| `vietnam_IF_features_*.csv` | **Isolation Forest - để TRAIN** | 14 features (không có label) |
+| `vietnam_IF_labels_*.csv` | **Isolation Forest - để EVALUATE** | is_fraud + fraud_type |
+| `vietnam_LGBM_train_*.csv` | **LightGBM - để TRAIN** | 29 features + 1 label |
 
 ---
 
 ## Features cho Isolation Forest
 
-**Tổng: 14 features + 1 label = 15 columns**
+**Tổng: 14 features (KHÔNG có label trong file train)**
 
-Isolation Forest là thuật toán **unsupervised anomaly detection** - không cần label để train. Hoạt động bằng cách "cô lập" các điểm bất thường thông qua random splits. Hiệu quả nhất với:
+> ⚠️ **QUAN TRỌNG**: Isolation Forest là thuật toán **unsupervised** - **KHÔNG dùng label để train!**
+> Label (`is_fraud`) được xuất ra file riêng để dùng cho việc **evaluate** model.
+
+Isolation Forest hoạt động bằng cách "cô lập" các điểm bất thường thông qua random splits. Hiệu quả nhất với:
 - Features continuous có phân bố rõ ràng
 - Anomalies là outliers về mặt giá trị
 - Ít features categorical
 
-### Danh sách features:
+### Files xuất ra cho Isolation Forest:
+
+| File | Nội dung | Mục đích |
+|------|----------|----------|
+| `vietnam_IF_features_*.csv` | 14 features | **Train** model |
+| `vietnam_IF_labels_*.csv` | is_fraud, fraud_type | **Evaluate** model |
+
+### Danh sách features (14 features):
 
 | # | Feature | Loại | Mô tả | Tại sao quan trọng |
 |---|---------|------|-------|-------------------|
@@ -58,36 +69,32 @@ Isolation Forest là thuật toán **unsupervised anomaly detection** - không c
 | 12 | `is_new_recipient` | Binary | 1 nếu người nhận mới | Key fraud indicator |
 | 13 | `is_new_device` | Binary | 1 nếu thiết bị mới | ATO indicator |
 | 14 | `account_age_risk` | Continuous | `1 / log(account_age_days)` | Tài khoản mới = rủi ro cao hơn |
-| - | `is_fraud` | Binary | Label (0/1) | Để evaluate, không dùng khi train |
 
-### Cách sử dụng với Isolation Forest:
+### Cách sử dụng đúng với Isolation Forest:
 
 ```python
 from sklearn.ensemble import IsolationForest
 import pandas as pd
+from sklearn.metrics import classification_report
 
-# Load data
-df = pd.read_csv('vietnam_fraud_isolation_forest_50000_rows.csv')
+# 1. Load features (KHÔNG có label)
+X = pd.read_csv('vietnam_IF_features_50000_rows.csv')
 
-# Tách features và label
-X = df.drop('is_fraud', axis=1)
-y = df['is_fraud']
-
-# Train Isolation Forest (unsupervised - không dùng y)
+# 2. Train Isolation Forest (unsupervised - KHÔNG dùng label)
 model = IsolationForest(
     n_estimators=100,
     contamination=0.05,  # ~5% fraud rate
     random_state=42
 )
-model.fit(X)
+model.fit(X)  # Chỉ có X, không có y!
 
-# Predict (-1 = anomaly, 1 = normal)
+# 3. Predict (-1 = anomaly, 1 = normal)
 predictions = model.predict(X)
-df['predicted_fraud'] = (predictions == -1).astype(int)
+predicted_fraud = (predictions == -1).astype(int)
 
-# Evaluate
-from sklearn.metrics import classification_report
-print(classification_report(y, df['predicted_fraud']))
+# 4. Evaluate với labels riêng
+labels = pd.read_csv('vietnam_IF_labels_50000_rows.csv')
+print(classification_report(labels['is_fraud'], predicted_fraud))
 ```
 
 ---

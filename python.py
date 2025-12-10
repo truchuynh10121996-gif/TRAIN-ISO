@@ -786,16 +786,18 @@ if 'generated_data' in st.session_state:
     st.subheader("📥 Tải xuống dữ liệu")
 
     # Định nghĩa features cho từng model
+    # ISOLATION FOREST: Unsupervised - KHÔNG dùng label để train
     ISOLATION_FOREST_FEATURES = [
         'amount_log', 'amount_deviation_ratio', 'amount_vs_avg_user',
         'hours_since_prev_tx', 'velocity_1h', 'velocity_24h', 'velocity_ratio',
         'location_diff_km', 'location_anomaly',
         'hour_deviation', 'is_night_hours',
         'is_new_recipient', 'is_new_device',
-        'account_age_risk',
-        'is_fraud'  # Label
+        'account_age_risk'
+        # KHÔNG có is_fraud - Isolation Forest là unsupervised
     ]
 
+    # LIGHTGBM: Supervised - CẦN label để train
     LIGHTGBM_FEATURES = [
         'transaction_type', 'amount_log', 'amount_tier', 'amount_vs_avg_user',
         'channel', 'channel_risk', 'tx_type_risk',
@@ -807,7 +809,7 @@ if 'generated_data' in st.session_state:
         'is_first_large_tx', 'recipient_is_suspicious',
         'behavioral_risk_score', 'time_context_risk',
         'user_activity_level', 'recipient_diversity',
-        'is_fraud'  # Label
+        'is_fraud'  # Label - LightGBM là supervised, CẦN label
     ]
 
     col1, col2 = st.columns(2)
@@ -844,40 +846,56 @@ if 'generated_data' in st.session_state:
     col3, col4 = st.columns(2)
 
     with col3:
-        st.markdown("**Isolation Forest**")
-        st.caption("Unsupervised anomaly detection")
+        st.markdown("**Isolation Forest** (Unsupervised)")
+        st.warning("⚠️ **KHÔNG dùng label để train!** File chỉ chứa features.")
+
+        # File features (để train)
         df_isolation = df_display[ISOLATION_FOREST_FEATURES].copy()
         csv_isolation = df_isolation.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="⬇️ Isolation Forest Data",
+            label="⬇️ IF Features (để Train)",
             data=csv_isolation,
-            file_name=f"vietnam_fraud_isolation_forest_{len(df_display)}_rows.csv",
+            file_name=f"vietnam_IF_features_{len(df_display)}_rows.csv",
             mime="text/csv",
             use_container_width=True
         )
-        st.caption(f"{len(ISOLATION_FOREST_FEATURES)} features")
+        st.caption(f"{len(ISOLATION_FOREST_FEATURES)} features - Dùng để train model")
+
+        # File labels riêng (để evaluate)
+        df_labels = df_display[['is_fraud', 'fraud_type']].copy()
+        csv_labels = df_labels.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            label="⬇️ Labels (để Evaluate)",
+            data=csv_labels,
+            file_name=f"vietnam_IF_labels_{len(df_display)}_rows.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
+        st.caption("Labels riêng - Dùng để đánh giá model sau khi train")
 
         with st.expander("Xem danh sách features"):
-            for f in ISOLATION_FOREST_FEATURES[:-1]:  # Trừ is_fraud
+            for f in ISOLATION_FOREST_FEATURES:
                 st.markdown(f"- `{f}`")
 
     with col4:
-        st.markdown("**LightGBM**")
-        st.caption("Supervised classification")
+        st.markdown("**LightGBM** (Supervised)")
+        st.info("ℹ️ **CẦN label để train!** File bao gồm is_fraud.")
+
         df_lgbm = df_display[LIGHTGBM_FEATURES].copy()
         csv_lgbm = df_lgbm.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="⬇️ LightGBM Data",
+            label="⬇️ LightGBM Data (Features + Label)",
             data=csv_lgbm,
-            file_name=f"vietnam_fraud_lightgbm_{len(df_display)}_rows.csv",
+            file_name=f"vietnam_LGBM_train_{len(df_display)}_rows.csv",
             mime="text/csv",
             use_container_width=True
         )
-        st.caption(f"{len(LIGHTGBM_FEATURES)} features")
+        st.caption(f"{len(LIGHTGBM_FEATURES)} columns (29 features + 1 label)")
 
         with st.expander("Xem danh sách features"):
             for f in LIGHTGBM_FEATURES[:-1]:  # Trừ is_fraud
                 st.markdown(f"- `{f}`")
+            st.markdown("- `is_fraud` *(label)*")
 
 else:
     st.info("👈 Cấu hình tham số ở sidebar và nhấn **Tạo Dữ liệu** để bắt đầu.")
@@ -903,8 +921,12 @@ else:
         st.markdown("""
         ### Features cho Isolation Forest (14 features)
 
-        **Isolation Forest** là unsupervised anomaly detection - không cần label để train.
-        Hiệu quả với features continuous có outliers rõ ràng.
+        **Isolation Forest** là **unsupervised** anomaly detection:
+        - ⚠️ **KHÔNG dùng label (`is_fraud`) để train**
+        - Label chỉ dùng để **evaluate** model sau khi train
+        - Hoạt động bằng cách "cô lập" các điểm bất thường qua random splits
+
+        #### Danh sách features:
 
         | Feature | Loại | Mô tả |
         |---------|------|-------|
@@ -922,6 +944,22 @@ else:
         | `is_new_recipient` | Binary | 1 nếu người nhận mới |
         | `is_new_device` | Binary | 1 nếu thiết bị mới |
         | `account_age_risk` | Continuous | 1/log(account_age) - tài khoản mới rủi ro hơn |
+
+        #### Cách sử dụng đúng:
+        ```python
+        # 1. Load features (KHÔNG có label)
+        X = pd.read_csv('vietnam_IF_features_50000_rows.csv')
+
+        # 2. Train Isolation Forest (unsupervised)
+        model = IsolationForest(contamination=0.05)
+        model.fit(X)  # Không có y!
+
+        # 3. Predict
+        predictions = model.predict(X)  # -1 = anomaly
+
+        # 4. Evaluate với labels riêng
+        labels = pd.read_csv('vietnam_IF_labels_50000_rows.csv')
+        ```
         """)
 
     with tab3:
