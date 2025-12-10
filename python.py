@@ -11,14 +11,8 @@ st.set_page_config(
 )
 
 # --- Chức năng chính: Tạo DataFrame ---
-# Giữ cache để tăng tốc độ nếu tham số không đổi
 @st.cache_data
 def generate_synthetic_data(num_rows, fraud_ratio):
-    """
-    Tạo DataFrame chứa dữ liệu giao dịch giả lập với 24 cột đặc trưng,
-    có tính toán các đặc trưng (features) và phân phối gần với thực tế,
-    đặc biệt cho cả Fraud (Hack) và Scam (Lừa đảo).
-    """
     st.info(f"Đang tạo {num_rows:,} dòng dữ liệu... Quá trình có thể mất vài giây.")
     
     # 1. Các cột định danh và cơ bản
@@ -36,10 +30,9 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     timestamps = pd.to_datetime(start_date) + (end_date - start_date) * np.random.rand(num_rows)
     data['timestamp'] = timestamps
     
-    # Sắp xếp theo thời gian là bắt buộc cho rolling window
     df = pd.DataFrame(data).sort_values(by='timestamp').reset_index(drop=True)
 
-    # 2. Cột về số tiền (Amount) - Số tiền chẵn nghìn
+    # 2. Cột về số tiền (Amount)
     mu, sigma = 7, 1.5 
     amounts = np.exp(np.random.normal(mu, sigma, num_rows))
     amounts = (np.round(amounts / 1000) * 1000).astype(int)
@@ -49,8 +42,6 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     df['amount'] = amounts
     df['amount_log'] = np.log1p(df['amount'])
     df['amount_norm'] = (df['amount'] - df['amount'].min()) / (df['amount'].max() - df['amount'].min())
-
-    # Tính percentile
     df['amount_percentile_system'] = df['amount'].rank(pct=True)
 
     # 3. Các cột về thời gian và cơ bản
@@ -58,23 +49,25 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     df['day_of_week'] = df['timestamp'].dt.dayofweek
     df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
     df['account_age_days'] = np.random.randint(30, 365 * 5, num_rows)
-    df['channel'] = np.random.choice([0, 1, 2], num_rows, p=[0.7, 0.2, 0.1]) # 0:MobileApp, 1:Web, 2:API
+    df['channel'] = np.random.choice([0, 1, 2], num_rows, p=[0.7, 0.2, 0.1]) 
     df['location_diff_km'] = np.clip(np.random.lognormal(0.5, 1, num_rows) - 0.5, 0, 5000)
     
-    # 4. Các cột hành vi (ĐÃ SỬA LỖI AttributeError)
+    # 4. Các cột hành vi (ĐÃ SỬA LỖI VALUEERROR/ATTRIBUTEERROR BẰNG MERGE)
     df['time_gap_prev_min'] = df.groupby('user_id')['timestamp'].diff().dt.total_seconds().fillna(0) / 60
     df['time_gap_prev_min'] = df['time_gap_prev_min'].apply(lambda x: x if x > 1 else np.random.lognormal(2, 1))
 
     # 1. Tạo DataFrame tạm thời với 'timestamp' làm index
     df_temp = df.set_index('timestamp')
     
-    # 2. Tính velocity: group theo user_id, sử dụng .count() trên một cột bất kỳ (ví dụ 'tx_id')
-    velocity_1h = df_temp.groupby('user_id')['tx_id'].rolling('1h', closed='left').count()
-    velocity_24h = df_temp.groupby('user_id')['tx_id'].rolling('24h', closed='left').count()
+    # 2. Tính velocity
+    velocity_1h_series = df_temp.groupby('user_id')['tx_id'].rolling('1h', closed='left').count()
+    velocity_24h_series = df_temp.groupby('user_id')['tx_id'].rolling('24h', closed='left').count()
 
-    # 3. Gán kết quả trở lại df gốc (reset index để gán đúng vị trí)
-    df['velocity_1h'] = velocity_1h.reset_index(level=0, drop=True)
-    df['velocity_24h'] = velocity_24h.reset_index(level=0, drop=True)
+    # 3. Chuyển kết quả về DataFrame và MERGE dựa trên 'user_id' và 'timestamp'
+    df_velocity = velocity_1h_series.rename('velocity_1h').to_frame()
+    df_velocity['velocity_24h'] = velocity_24h_series
+    
+    df = df.merge(df_velocity.reset_index(), on=['user_id', 'timestamp'], how='left')
     
     # Tiếp tục tính freq_norm
     df['freq_norm'] = (df['velocity_24h'] - df['velocity_24h'].min()) / (df['velocity_24h'].max() - df['velocity_24h'].min())
@@ -88,9 +81,13 @@ def generate_synthetic_data(num_rows, fraud_ratio):
     # 5. Các cột MỚI để bắt Lừa đảo (Scam Features)
     
     # 5.1 amount_vs_avg_user_1m (Tỷ lệ so với trung bình 1 tháng)
-    # Sửa lỗi: Cần chọn cột 'amount' để tính rolling mean
-    avg_amount_1m = df_temp.groupby('user_id')['amount'].rolling('30d', closed='left').mean().reset_index(level=0, drop=True).shift(1).fillna(df['amount'].mean() * 0.5)
-    df['avg_amount_1m'] = avg_amount_1m # Gán lại vào df chính
+    # Tính rolling mean và gán bằng MERGE
+    avg_amount_1m_series = df_temp.groupby('user_id')['amount'].rolling('30d', closed='left').mean().shift(1).fillna(df['amount'].mean() * 0.5)
+    
+    df_avg = avg_amount_1m_series.rename('avg_amount_1m').to_frame().reset_index()
+    
+    df = df.merge(df_avg, on=['user_id', 'timestamp'], how='left')
+    
     df['amount_vs_avg_user_1m'] = df['amount'] / df['avg_amount_1m']
     df.drop(columns=['avg_amount_1m'], inplace=True)
     
@@ -175,54 +172,4 @@ fraud_ratio_target = st.sidebar.slider(
     max_value=10.0,
     value=5.0,
     step=0.1,
-    format="%.1f%%",
-    help="Tỷ lệ mẫu bị đánh dấu là gian lận/lừa đảo (nhãn 1). Thường là 1-5% trong thực tế."
-)
-
-# Chạy nút tạo dữ liệu
-if st.sidebar.button("🚀 Tạo Dữ liệu Mẫu (24 Features)"):
-    start_time = time.time()
-    
-    # Gọi hàm tạo dữ liệu
-    df_result = generate_synthetic_data(num_rows_target, fraud_ratio_target / 100)
-
-    st.header("📊 Dữ liệu Mẫu đã Tạo")
-    st.info(f"Tổng số cột đặc trưng: 24. Tổng số cột trong file CSV: 25 (bao gồm cột nhãn 'is_fraud').")
-    st.dataframe(df_result.head(10)) # Hiển thị 10 dòng đầu
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.subheader("Tóm tắt Dữ liệu")
-        st.write(df_result.describe().transpose())
-        
-    with col2:
-        st.subheader("Phân phối Gian Lận/Lừa đảo")
-        fraud_summary = df_result['is_fraud'].value_counts(normalize=True).mul(100).rename('Tỷ lệ (%)').reset_index()
-        st.dataframe(fraud_summary.rename(columns={'index': 'Nhãn (0=Normal, 1=Fraud/Scam)'}))
-        
-        # --- Chức năng Download ---
-        csv_data = df_result.to_csv(index=False).encode('utf-8')
-        
-        st.download_button(
-            label="⬇️ Tải file CSV mẫu về",
-            data=csv_data,
-            file_name=f'synthetic_fraud_scam_data_{num_rows_target}_{int(fraud_ratio_target*10)}p_fraud.csv',
-            mime='text/csv',
-            help="Tải file CSV chứa 24+1 cột, được thiết kế cho cả gian lận (Hack) và lừa đảo (Scam)."
-        )
-        
-    end_time = time.time()
-    st.sidebar.success(f"Hoàn thành trong {end_time - start_time:.2f} giây.")
-
-else:
-    st.info("""
-    Nhấn **'🚀 Tạo Dữ liệu Mẫu (24 Features)'** ở thanh bên trái để bắt đầu tạo tập dữ liệu.
-
-    **📝 Các Cột Đặc trưng Mới (Giúp phát hiện Lừa đảo - Scam):**
-    1.  **`amount_vs_avg_user_1m`**: Tỷ lệ số tiền giao dịch hiện tại so với số tiền trung bình của người dùng trong 1 tháng trước.
-    2.  **`is_first_large_tx`**: 1 nếu đây là giao dịch lớn nhất từ trước đến nay của người dùng.
-    3.  **`recipient_is_suspicious`**: 1 nếu tài khoản người nhận nằm trong danh sách đen/đáng ngờ.
-
-    **Kết quả:** Tập dữ liệu này giả lập cả giao dịch Gian lận (ATO/Hack) và Lừa đảo (Scam), mang lại sự đa dạng cao hơn cho quá trình huấn luyện mô hình.
-    """)
+    format="%.1f%%
